@@ -1,59 +1,99 @@
-# This workflow uses actions that are not certified by GitHub.
-# They are provided by a third-party and are governed by
-# separate terms of service, privacy policy, and support
-# documentation.
+name: build blockscout-optimism-bedrock image
 
-name: Publish Docker image
-
-on:
-  release:
-    types: [published]
+on: 
+  push:
+    branches:
+      - "main"
+      - "production"
+      - "dev"
+  # Trigger without any parameters a proactive rebuild 
+  workflow_dispatch: {}
+  workflow_call:
 
 env:
-  OTP_VERSION: '24.3.4.1'
-  ELIXIR_VERSION: '1.13.4'
+  IMAGE_NAME: gcr.io/blockscout-optimism-bedrock
 
 jobs:
-  push_to_registry:
-    name: Push Docker image to Docker Hub
+  container:
     runs-on: ubuntu-latest
-    env:
-      RELEASE_VERSION: 4.1.8
+    # https://docs.github.com/en/actions/reference/authentication-in-a-workflow
+    permissions:
+      id-token: write
+      packages: write
+      contents: read
+    timeout-minutes: 60
+
     steps:
-      - name: Check out the repo
+      - name: Checkout repository
+        id: checkout
         uses: actions/checkout@v3
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
-
-      - name: Set up Docker Buildx
+      - name: Install Docker BuildX
         uses: docker/setup-buildx-action@v2
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v2
+        id: buildx
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          install: true
 
-      - name: Extract metadata (tags, labels) for Docker
+      - name: set-env
+        if: ${{ github.ref == 'refs/heads/production' }}
+        run: |
+          echo "REGISTRY=us-docker.pkg.dev/optimum-sound-359720" >> $GITHUB_ENV
+      - name: set-env
+        if: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          echo "REGISTRY=us-docker.pkg.dev/exfac-staging" >> $GITHUB_ENV
+      - name: set-env
+        if: ${{ github.ref == 'refs/heads/dev' }}
+        run: |
+            echo "REGISTRY=us-docker.pkg.dev/exfac-dev" >> $GITHUB_ENV
+
+      - id: 'auth'
+        name: 'Authenticate to Google Cloud'
+        uses: 'google-github-actions/auth@v0'
+        with:
+          credentials_json: ${{ github.ref == 'refs/heads/production' && secrets.DEPLOYER_SERVICE_ACCOUNT_KEY || github.ref == 'refs/heads/main' &&  secrets.STAGING_DEPLOYER_SERVICE_ACCOUNT_KEY || github.ref == 'refs/heads/dev' && secrets.DEV_DEPLOYER_SERVICE_ACCOUNT_KEY }}
+
+      - name: Authenticate docker
+        run: |
+          gcloud auth configure-docker --quiet us-docker.pkg.dev
+
+      # Extract metadata (tags, labels) for Docker
+      # https://github.com/docker/metadata-action
+      - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v4
         with:
-          images: blockscout/blockscout
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
-      - name: Build & Push Docker image
-        uses: docker/build-push-action@v3
+      # If the job is triggered via workflow dispatch and on a master branch, tag branch and latest
+      # Otherwise, just tag as the branch name
+      - name: Finalize Docker Metadata
+        id: docker_tagging
+        run: |
+          echo "manual trigger from master/main branch, assigning latest tag"
+          echo "::set-output name=docker_tags::${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${GITHUB_REF##*/},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+      # Log docker metadata to explicitly know what is being pushed
+      - name: Inspect Docker Metadata
+        run: |
+          echo "TAGS -> ${{ steps.docker_tagging.outputs.docker_tags }}"
+          echo "LABELS ->  ${{ steps.meta.outputs.labels }}"
+      # Build and push Docker image
+      # https://github.com/docker/build-push-action
+      # https://github.com/docker/build-push-action/blob/master/docs/advanced/cache.md
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v3.1.1
         with:
           context: .
-          file: ./docker/Dockerfile
           push: true
-          cache-from: type=registry,ref=blockscout/blockscout:buildcache
-          cache-to: type=registry,ref=blockscout/blockscout:buildcache,mode=max
-          tags: blockscout/blockscout:latest, blockscout/blockscout:${{ env.RELEASE_VERSION }}
-          platforms: |
-            linux/arm64
-            linux/amd64
+          file: ./docker/Dockerfile
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.docker_tagging.outputs.docker_tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           build-args: |
+            BUILDTIME=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+            VERSION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
+            REVISION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.revision'] }}
             CACHE_EXCHANGE_RATES_PERIOD=
             DISABLE_READ_API=false
             API_PATH=/
@@ -64,48 +104,4 @@ jobs:
             WOBSERVER_ENABLED=false
             ADMIN_PANEL_ENABLED=
             CACHE_ADDRESS_WITH_BALANCES_UPDATE_INTERVAL=
-            SOCKET_ROOT=/
-
-  merge-master-after-release:
-    name: Merge 'master' to specific branch after release
-    runs-on: ubuntu-latest
-    env:
-      BRANCHES: |
-        production-core-stg
-        production-eth-stg
-        production-harmony-mainnet-shard-0-stg
-        production-lukso-stg
-        production-optimism-goerli-stg
-        production-optimism-bedrock-goerli-stg
-        production-optimism-mainnet-stg
-        production-optimism-stg
-        production-rsk-stg
-        production-sokol-stg
-        production-xdai-stg
-    steps:
-    - uses: actions/checkout@v2
-    - name: Set Git config
-      run: |
-          git config --local user.email "actions@github.com"
-          git config --local user.name "Github Actions"
-    - name: Merge master back after release
-      run: |
-          git fetch --unshallow
-          touch errors.txt
-          for branch in $BRANCHES;
-          do
-            git reset --merge
-            git checkout master
-            git fetch origin
-            echo $branch
-            git ls-remote --exit-code --heads origin $branch || { echo $branch >> errors.txt; continue; }
-            echo "Merge 'master' to $branch"
-            git checkout $branch
-            git pull || { echo $branch >> errors.txt; continue; }
-            git merge --no-ff master -m "Auto-merge master back to $branch" || { echo $branch >> errors.txt; continue; }
-            git push || { echo $branch >> errors.txt; continue; }
-            git checkout master;
-          done
-          [ -s errors.txt ] && echo "There are problems with merging 'master' to branches:" || echo "Errors file is empty"
-          cat errors.txt
-          [ ! -s errors.txt ]
+            SOCKET_ROOT=
