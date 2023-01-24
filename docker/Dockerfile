@@ -1,4 +1,4 @@
-FROM bitwalker/alpine-elixir-phoenix:1.13 AS builder
+FROM ghcr.io/conduit-xyz/alpine-elixir-phoenix:1.14 AS builder
 
 WORKDIR /app
 
@@ -72,7 +72,7 @@ RUN mkdir -p /opt/release \
   && mv _build/${MIX_ENV}/rel/blockscout /opt/release
 
 ##############################################################
-FROM bitwalker/alpine-elixir-phoenix:1.13
+FROM ghcr.io/conduit-xyz/alpine-elixir-phoenix:1.14
 
 WORKDIR /app
 
