@@ -294,6 +294,12 @@ defmodule EthereumJSONRPC.Receipt do
     :ignore
   end
 
+  # Optimism Bedrock fields
+  defp entry_to_elixir({key, _})
+       when key in ~w(depositNonce) do
+    :ignore
+  end
+
   # Nethermind field
   defp entry_to_elixir({"error", _}) do
     :ignore
